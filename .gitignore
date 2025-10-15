@@ -1,1 +1,2 @@
 *.csv
+processed_data/*.csv
