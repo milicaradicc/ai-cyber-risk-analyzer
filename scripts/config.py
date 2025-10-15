@@ -11,7 +11,7 @@ class Config:
     START_YEAR = 2005
     END_YEAR = 2026
     EMBEDDING_MODEL = "microsoft/codebert-base"
-    EMBEDDING_BATCH_SIZE = 32
+    EMBEDDING_BATCH_SIZE = 16
     EMBEDDING_MAX_LENGTH = 128
     
     # Feature engineering

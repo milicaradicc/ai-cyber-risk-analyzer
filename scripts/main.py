@@ -524,41 +524,52 @@ def balance_classes(X_train, y_train):
 
 def main():
     print("\n" + "="*70)
-    print("🚀 CVE VULNERABILITY PREPROCESSING PIPELINE")
+    print("🚀 CVE VULNERABILITY PREPROCESSING PIPELINE (CSV INPUT)")
     print("="*70)
-    
+
     # Kreiraj output direktorijum
     ensure_dir(Config.OUTPUT_DIR)
-    
-    # 1. LOAD DATA
-    df_cve = load_nvd_data()
-    df_exploit = load_exploit_data()
-    
-    # 2. MERGE & FEATURE ENGINEERING
-    df_merged = merge_and_engineer_features(df_cve, df_exploit)
-    df_merged = calculate_exploit_probability(df_merged)
-    
-    # 3. HANDLE MISSING VALUES
+
+    # 1. UČITAJ VEĆ SPOJENI CSV
+    print("\n📂 Učitavanje podataka iz CSV fajla...")
+    input_path = os.path.join(Config.OUTPUT_DIR, "merged_data_raw.csv")
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"❌ CSV fajl nije pronađen na putanji: {input_path}")
+    df_merged = pd.read_csv(input_path)
+    print(f"✅ Učitano {len(df_merged)} redova iz {input_path}.")
+
+    # Ako nema kolone 'description', kreiraj prazne stringove (da embeddings ne puknu)
+    if 'description' not in df_merged.columns:
+        print("⚠️  Nije pronađena kolona 'description' — popunjavam praznim stringovima.")
+        df_merged['description'] = ""
+
+    # 2. HANDLING MISSING VALUES (vrati imputer za inference)
     df_merged, imputer = handle_missing_values(df_merged)
-    
-    # Sačuvaj raw merged data
-    df_merged.to_csv(os.path.join(Config.OUTPUT_DIR, "merged_data_raw.csv"), index=False)
-    print(f"\n💾 Sačuvan raw merged data")
-    
-    # 4. TRAIN/VALIDATION/TEST SPLIT
+
+    # Sačuvaj raw merged data (opciono, ali zgodno)
+    df_merged.to_csv(os.path.join(Config.OUTPUT_DIR, "merged_data_after_impute.csv"), index=False)
+    print(f"\n💾 Sačuvan merged data posle imputacije")
+
+    # 3. TRAIN/VALIDATION/TEST SPLIT
     print("\n" + "="*70)
     print("✂️  PODELA PODATAKA")
     print("="*70)
-    
-    # Prvo izdvoj test set
+
+    # ako 'vulnerable' ne postoji, pokušaj da ga kreiraš iz 'exploit_probability' kao binarnu vrednost
+    if 'vulnerable' not in df_merged.columns:
+        if 'exploit_probability' in df_merged.columns:
+            print("⚠️  Nije pronađena kolona 'vulnerable' — kreiram binarni target iz 'exploit_probability' (>0.5).")
+            df_merged['vulnerable'] = (df_merged['exploit_probability'] > 0.5).astype(int)
+        else:
+            raise KeyError("❌ Potrebna je kolona 'vulnerable' ili 'exploit_probability' u input CSV-u.")
+
     df_train_val, df_test = train_test_split(
         df_merged,
         test_size=Config.TEST_SIZE,
         stratify=df_merged['vulnerable'],
         random_state=Config.RANDOM_STATE
     )
-    
-    # Zatim podeli train_val na train i validation
+
     val_size_adjusted = Config.VALIDATION_SIZE / (1 - Config.TEST_SIZE)
     df_train, df_val = train_test_split(
         df_train_val,
@@ -566,107 +577,184 @@ def main():
         stratify=df_train_val['vulnerable'],
         random_state=Config.RANDOM_STATE
     )
-    
+
     print(f"  Train set: {len(df_train)} ({len(df_train)/len(df_merged)*100:.1f}%)")
     print(f"  Validation set: {len(df_val)} ({len(df_val)/len(df_merged)*100:.1f}%)")
     print(f"  Test set: {len(df_test)} ({len(df_test)/len(df_merged)*100:.1f}%)")
-    
-    # 5. ENCODE CATEGORICAL FEATURES
+
+    # 4. ENCODE CATEGORICAL FEATURES
+    print("\n🔁 Enkodiranje kategorijskih feature-a...")
     df_cat_train, df_cat_val, encoder = encode_categorical_features(df_train, df_val)
-    df_cat_test, _ = encode_categorical_features(df_test, encoder=encoder) 
+    # Za test koristimo isti encoder
+    df_cat_test, _ = encode_categorical_features(df_test, encoder=encoder)
 
-    # 6. SCALE NUMERICAL FEATURES  
+    # 5. SCALE NUMERICAL FEATURES
+    print("\n🔢 Skaliranje numeričkih feature-a...")
     df_num_train, df_num_val, scaler = scale_numerical_features(df_train, df_val)
-    df_num_test, _ = scale_numerical_features(df_test, scaler=scaler)  
+    df_num_test, _ = scale_numerical_features(df_test, scaler=scaler)
 
-    # 7. GENERATE TEXT EMBEDDINGS
+    # 6. GENERATE TEXT EMBEDDINGS
     print("\n" + "="*70)
     print("📝 TEXT EMBEDDINGS")
     print("="*70)
-    
+
     tokenizer = AutoTokenizer.from_pretrained(Config.EMBEDDING_MODEL)
     model = AutoModel.from_pretrained(Config.EMBEDDING_MODEL)
-    
+
+    # U slučaju da su descriptioni NaN, zameniti sa ""
+    df_train['description'] = df_train['description'].fillna("").astype(str)
+    df_val['description'] = df_val['description'].fillna("").astype(str)
+    df_test['description'] = df_test['description'].fillna("").astype(str)
+
     embeddings_train = generate_embeddings_batch(df_train['description'], model, tokenizer)
     embeddings_val = generate_embeddings_batch(df_val['description'], model, tokenizer)
     embeddings_test = generate_embeddings_batch(df_test['description'], model, tokenizer)
-    
-    # 8. DIMENSIONALITY REDUCTION
+
+    # 7. DIMENSIONALITY REDUCTION (PCA ako je uključen)
+    print("\n🔽 Dimensionality reduction (PCA)...")
     embeddings_train, embeddings_val, pca = reduce_embedding_dimensions(
         embeddings_train, embeddings_val
     )
-    embeddings_test, _, _ = reduce_embedding_dimensions(embeddings_test, pca=pca)
+    # reduce test embeddings koristeći trenirani pca (ako postoji)
+    if pca is not None:
+        embeddings_test, _, _ = reduce_embedding_dimensions(embeddings_test, pca=pca)
+    else:
+        # Ukoliko reduce_embedding_dimensions vraća istu strukturu i kada pca=None:
+        embeddings_test, _, _ = reduce_embedding_dimensions(embeddings_test, pca=pca)
 
-    # 💾 DODAJ OVO - Sačuvaj embeddings
+    # Sačuvaj embeddings
     save_pickle(embeddings_train, os.path.join(Config.OUTPUT_DIR, "embeddings_train.pkl"))
     save_pickle(embeddings_val, os.path.join(Config.OUTPUT_DIR, "embeddings_val.pkl"))
     save_pickle(embeddings_test, os.path.join(Config.OUTPUT_DIR, "embeddings_test.pkl"))
     print(f"\n💾 Sačuvani text embeddings")
 
-    # Convert to DataFrame
+    # Convert embeddings to DataFrame
     embed_cols = [f"embed_{i}" for i in range(embeddings_train.shape[1])]
     df_embed_train = pd.DataFrame(embeddings_train, columns=embed_cols, index=df_train.index)
     df_embed_val = pd.DataFrame(embeddings_val, columns=embed_cols, index=df_val.index)
     df_embed_test = pd.DataFrame(embeddings_test, columns=embed_cols, index=df_test.index)
-    
-    # 9. COMBINE ALL FEATURES
+
+    # 8. KOMBINOVANJE SVIH FEATURE-A
     print("\n🔗 Kombinovanje svih feature-a...")
-    
-    # Select relevant original features
+
     keep_cols = ['CVE_ID', 'vulnerable', 'exploit_probability', 'num_exploits',
                  'is_remote', 'requires_auth', 'requires_user_interaction',
                  'high_severity', 'critical_severity', 'is_critical_cwe',
                  'cvss_missing', 'year_published', 'month_published', 'quarter_published']
-    
+
+    # Proveri da li sve keep_cols postoje u dataframovima; ako ne, popuni NaN/e default vrednostima
+    for col in keep_cols:
+        if col not in df_train.columns:
+            print(f"⚠️  Kolona '{col}' nije u train DF — dodajem sa NaN vrednostima.")
+            df_train[col] = np.nan
+        if col not in df_val.columns:
+            df_val[col] = np.nan
+        if col not in df_test.columns:
+            df_test[col] = np.nan
+
     X_train_final = pd.concat([
         df_train[keep_cols].reset_index(drop=True),
         df_cat_train.reset_index(drop=True),
         df_num_train.reset_index(drop=True),
         df_embed_train.reset_index(drop=True)
     ], axis=1)
-    
+
     X_val_final = pd.concat([
         df_val[keep_cols].reset_index(drop=True),
         df_cat_val.reset_index(drop=True),
         df_num_val.reset_index(drop=True),
         df_embed_val.reset_index(drop=True)
     ], axis=1)
-    
+
     X_test_final = pd.concat([
         df_test[keep_cols].reset_index(drop=True),
         df_cat_test.reset_index(drop=True),
         df_num_test.reset_index(drop=True),
         df_embed_test.reset_index(drop=True)
     ], axis=1)
-    
+
     print(f"✅ Train set: {X_train_final.shape}")
     print(f"✅ Validation set: {X_val_final.shape}")
     print(f"✅ Test set: {X_test_final.shape}")
 
-    # ========================================================================
-    # 10. PREPARE TARGETS
-    # ========================================================================
+    # 9. PREPARE TARGETS
     y_train_clf = X_train_final['vulnerable'].values
     y_train_reg = X_train_final['exploit_probability'].values
-    
+
     y_val_clf = X_val_final['vulnerable'].values
     y_val_reg = X_val_final['exploit_probability'].values
-    
+
     y_test_clf = X_test_final['vulnerable'].values
     y_test_reg = X_test_final['exploit_probability'].values
-    
-    # Remove target columns from features
-    feature_cols = [col for col in X_train_final.columns 
-                   if col not in ['CVE_ID', 'vulnerable', 'exploit_probability']]
-    
+
+    # Ukloni target kolone iz feature-a
+    feature_cols = [col for col in X_train_final.columns
+                    if col not in ['CVE_ID', 'vulnerable', 'exploit_probability']]
+
     X_train = X_train_final[feature_cols].values
     X_val = X_val_final[feature_cols].values
     X_test = X_test_final[feature_cols].values
-    
-    # ========================================================================
-    #
+
+    # 10. ČUVANJE SVIH ARTEFAKATA ZA TRENIRANJE I INFERENCE
+    print("\n" + "="*70)
+    print("💾 ČUVANJE PODATAKA ZA TRENIRANJE")
+    print("="*70)
+
+    # a) Preprocessed feature arrays
+    save_pickle(X_train, os.path.join(Config.OUTPUT_DIR, "X_train.pkl"))
+    save_pickle(X_val, os.path.join(Config.OUTPUT_DIR, "X_val.pkl"))
+    save_pickle(X_test, os.path.join(Config.OUTPUT_DIR, "X_test.pkl"))
+
+    # b) Target variables
+    save_pickle(y_train_clf, os.path.join(Config.OUTPUT_DIR, "y_train_clf.pkl"))
+    save_pickle(y_train_reg, os.path.join(Config.OUTPUT_DIR, "y_train_reg.pkl"))
+    save_pickle(y_val_clf, os.path.join(Config.OUTPUT_DIR, "y_val_clf.pkl"))
+    save_pickle(y_val_reg, os.path.join(Config.OUTPUT_DIR, "y_val_reg.pkl"))
+    save_pickle(y_test_clf, os.path.join(Config.OUTPUT_DIR, "y_test_clf.pkl"))
+    save_pickle(y_test_reg, os.path.join(Config.OUTPUT_DIR, "y_test_reg.pkl"))
+
+    # c) Preprocessors (za inference na novim podacima)
+    save_pickle(imputer, os.path.join(Config.OUTPUT_DIR, "imputer.pkl"))
+    save_pickle(encoder, os.path.join(Config.OUTPUT_DIR, "encoder.pkl"))
+    save_pickle(scaler, os.path.join(Config.OUTPUT_DIR, "scaler.pkl"))
+    if pca is not None:
+        save_pickle(pca, os.path.join(Config.OUTPUT_DIR, "pca.pkl"))
+
+    # d) Feature names
+    save_pickle(feature_cols, os.path.join(Config.OUTPUT_DIR, "feature_names.pkl"))
+
+    # e) Metadata
+    metadata = {
+        'n_train': len(X_train),
+        'n_val': len(X_val),
+        'n_test': len(X_test),
+        'n_features': len(feature_cols),
+        'class_distribution_train': pd.Series(y_train_clf).value_counts().to_dict(),
+        'class_distribution_val': pd.Series(y_val_clf).value_counts().to_dict(),
+        'class_distribution_test': pd.Series(y_test_clf).value_counts().to_dict(),
+        'timestamp': datetime.now().isoformat(),
+        'config': {
+            'embedding_model': Config.EMBEDDING_MODEL,
+            'use_pca': Config.USE_PCA,
+            'pca_components': Config.PCA_COMPONENTS if Config.USE_PCA else None,
+            'use_smote': Config.USE_SMOTE,
+            'test_size': Config.TEST_SIZE,
+            'validation_size': Config.VALIDATION_SIZE
+        }
+    }
+    save_pickle(metadata, os.path.join(Config.OUTPUT_DIR, "metadata.pkl"))
+
+    # f) Full DataFrames (sa CVE_ID za analizu)
+    X_train_final.to_csv(os.path.join(Config.OUTPUT_DIR, "X_train_full.csv"), index=False)
+    X_val_final.to_csv(os.path.join(Config.OUTPUT_DIR, "X_val_full.csv"), index=False)
+    X_test_final.to_csv(os.path.join(Config.OUTPUT_DIR, "X_test_full.csv"), index=False)
+
+    print("\n✅ Pipeline završio uspešno. Svi fajlovi su sačuvani u:", Config.OUTPUT_DIR)
+
 if __name__ == "__main__":
     try:
+        print("nesto")
+        print(torch.cuda.is_available())
         main()
     except KeyboardInterrupt:
         print("\n🛑 Prekinuto od strane korisnika (KeyboardInterrupt).")
