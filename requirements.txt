@@ -1,0 +1,17 @@
+pandas>=1.4
+numpy>=1.22
+scikit-learn>=1.1
+imbalanced-learn>=0.9
+transformers>=4.36
+torch>=1.12
+sentencepiece>=0.1.99
+protobuf>=3.20
+tqdm>=4.64
+xgboost>=1.7
+umap-learn>=0.5
+shap>=0.41
+lime>=0.2.0.1
+matplotlib>=3.5
+seaborn>=0.12
+plotly>=5.0
+streamlit>=1.20
