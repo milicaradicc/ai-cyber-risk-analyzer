@@ -1,6 +1,5 @@
 import torch
 
-
 class Config:
     # Paths
     NVD_BASE_FOLDER = "data"
